@@ -88,8 +88,8 @@ preflight → backup → install (disabled) → observe → canary → 5% → 25
 Скачайте установщик и его контрольную сумму из последнего релиза:
 
 ```bash
-curl -fsSLO https://github.com/LaRsonOFFai/bedolaga-grace-bridge/releases/latest/download/install.sh
-curl -fsSLO https://github.com/LaRsonOFFai/bedolaga-grace-bridge/releases/latest/download/SHA256SUMS
+curl -fsSLO https://github.com/LaRsonOFFai/bedolaga-grace-bridge/releases/download/v0.2.0/install.sh
+curl -fsSLO https://github.com/LaRsonOFFai/bedolaga-grace-bridge/releases/download/v0.2.0/SHA256SUMS
 grep ' install.sh$' SHA256SUMS | sha256sum -c -
 less install.sh
 sudo bash install.sh
