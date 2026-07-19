@@ -30,7 +30,10 @@ def verify(root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="grace-compat-") as temporary:
         for record in manifest["supported"]:
             checkout = Path(temporary) / record["version"]
-            command("git", "clone", "--filter=blob:none", UPSTREAM, str(checkout))
+            # Keep source hashes identical on Windows, Linux and CI. A normal
+            # Windows checkout may rewrite LF to CRLF before hashing.
+            command("git", "clone", "--filter=blob:none", "--no-checkout", UPSTREAM, str(checkout))
+            command("git", "config", "core.autocrlf", "false", cwd=checkout)
             command("git", "switch", "--detach", record["commit"], cwd=checkout)
             patch = root / record["patch"]
             if sha256(patch) != record["patchSha256"]:

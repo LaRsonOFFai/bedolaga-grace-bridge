@@ -10,12 +10,12 @@
       "patch": "patches/bedolaga/v3.64.0/bedolaga-grace-bridge.patch",
       "patchSha256": "b91e4dd4211026a75ba89df63cb5cba291963d005d0b48e657d790d5181ffe1c",
       "files": {
-        ".env.example": "5d9367daac00b75facf6720bf68afd74c5fe0341a8ce4c3fdac8446dbe373419",
-        "app/config.py": "03f35e746ac1bcdf2734af544e6ab8bff392239ce9857a3d3347dcdc60b2ad19",
-        "app/cabinet/routes/admin_users.py": "9868aa30f94c22a88696ddbe27ed0695fce21ba27b0b98acffb146b9c388a061",
-        "app/services/remnawave_service.py": "efcbb9366768c60ea15aebc40885a2aef507fd9a0c6a0513cefb8ba3717de632",
-        "app/services/remnawave_webhook_service.py": "9b90f748167ac149833302d2112302d20f6411fc2e3f36ef547a8b538e1cffe6",
-        "app/services/subscription_service.py": "2649ff6973f4ea27dae7a0b7c581f549681301cb826025ee3b42e5fb3187a326"
+        ".env.example": "8505d12d06289ae0bf4d45f1d6589ff03b1e27f8ff6f8d03ccbd2c2de79b9dfa",
+        "app/config.py": "4c16511a6aafb295a81e812161c4568dc32c1e35c331ddb6dd8569138d88295b",
+        "app/cabinet/routes/admin_users.py": "b55ea0cd5a43f7bf05ea3f304eb7ff904c53ebe055404b860beea46966696e7e",
+        "app/services/remnawave_service.py": "579bb0d335d983b447bc1187627680684885e003675cf446eb17c6528d5a50a3",
+        "app/services/remnawave_webhook_service.py": "8374e0e88465a5f8efccc50db05a4fa23495097fabd77fdd4f2c806849c08694",
+        "app/services/subscription_service.py": "2239f3dfb657bfe8b71b3eda377a16a8c146ba2378090be191df6d3e449b5144"
       }
     }
   ]
