@@ -39,6 +39,7 @@ from .state import InstallationState
 
 ACTIVE_CONFIRM = "ВКЛЮЧИТЬ GRACE ДЛЯ ПУЛА"
 CANARY_CONFIRM = "CANARY ПРОВЕРЕН"
+ROLLOUT_STEPS = (5, 25, 50, 100)
 
 
 def _paths(args: argparse.Namespace) -> Paths:
@@ -95,6 +96,18 @@ def _confirm(prompt: str, *, default: bool = False) -> bool:
     if not answer:
         return default
     return answer in {"y", "yes", "д", "да"}
+
+
+def _choice(prompt: str, choices: dict[str, str], *, default: str) -> str:
+    while True:
+        print(prompt)
+        for key, label in choices.items():
+            suffix = " (по умолчанию)" if key == default else ""
+            print(f"  {key}. {label}{suffix}")
+        answer = input("Выберите действие: ").strip() or default
+        if answer in choices:
+            return answer
+        print("Введите номер из списка.")
 
 
 def _panel_label(candidate: PanelCandidate) -> str:
@@ -434,7 +447,11 @@ def cmd_install(args: argparse.Namespace) -> int:
     if report.compatibility.record.status == "canary":
         print("\nВнимание: пакет совместимости v3.64.0 имеет статус canary.")
         print("Установка создаст только выключенный кандидат; массовый rollout потребует отдельных шагов.")
-    if input("\nСоздать резервную копию и собрать выключенный кандидат? [y/N] ").strip().lower() != "y":
+    if getattr(args, "guided", False):
+        if not _confirm("Создать резервную копию и собрать выключенный кандидат?", default=True):
+            print("Отменено.")
+            return 1
+    elif input("\nСоздать резервную копию и собрать выключенный кандидат? [y/N] ").strip().lower() != "y":
         print("Отменено.")
         return 1
 
@@ -552,7 +569,11 @@ def cmd_approve_canary(args: argparse.Namespace) -> int:
     print(
         "Подтвердите: Grace включился, оплата восстановила обычный доступ, повторная синхронизация безопасна."
     )
-    if input(f"Введите: {CANARY_CONFIRM}\n> ").strip() != CANARY_CONFIRM:
+    if getattr(args, "guided", False):
+        if not _confirm("Все проверки тестового пользователя действительно пройдены?", default=False):
+            print("Тест пока не подтверждён. Canary продолжает работать только для одного UUID.")
+            return 1
+    elif input(f"Введите: {CANARY_CONFIRM}\n> ").strip() != CANARY_CONFIRM:
         print("Подтверждение не совпало. Ничего не изменено.")
         return 1
     state.update(phase="canary_verified").save(paths.state_file)
@@ -575,7 +596,11 @@ def cmd_activate(args: argparse.Namespace) -> int:
     if requested != expected:
         raise SystemExit(f"Следующая разрешённая ступень — только {expected}%")
     print(f"Будет включена ступень {requested}% подходящих пользователей.")
-    if input(f"Введите: {ACTIVE_CONFIRM}\n> ").strip() != ACTIVE_CONFIRM:
+    if getattr(args, "guided", False):
+        if not _confirm(f"Включить ступень {requested}%?", default=False):
+            print("Ступень не изменена.")
+            return 1
+    elif input(f"Введите: {ACTIVE_CONFIRM}\n> ").strip() != ACTIVE_CONFIRM:
         print("Подтверждение не совпало. Ничего не изменено.")
         return 1
     write_runtime(paths, mode="active", write_enabled=True, activation_percent=requested)
@@ -639,7 +664,10 @@ def cmd_rollback(args: argparse.Namespace) -> int:
     selected = backups[0]
     print(f"Будет использована резервная копия {selected.name}.")
     print("Bridge сначала попытается снять только те overlay, которыми всё ещё владеет.")
-    if input("Продолжить безопасный откат? [y/N] ").strip().lower() != "y":
+    if getattr(args, "guided", False):
+        if not _confirm("Продолжить безопасный откат?", default=False):
+            return 1
+    elif input("Продолжить безопасный откат? [y/N] ").strip().lower() != "y":
         return 1
     try:
         drained = asyncio.run(drain_grace(config))
@@ -672,7 +700,187 @@ def _menu_args(args: argparse.Namespace, **overrides: object) -> argparse.Namesp
     return argparse.Namespace(**values)
 
 
-def cmd_menu(args: argparse.Namespace) -> int:
+def _wizard_call(
+    args: argparse.Namespace,
+    title: str,
+    handler,
+    **overrides: object,
+) -> int:
+    print("\n" + "-" * 62)
+    print(title)
+    print("-" * 62)
+    try:
+        result = handler(_menu_args(args, guided=True, **overrides))
+    except KeyboardInterrupt:
+        print("\nДействие отменено.")
+        return 1
+    except SystemExit as error:
+        if error.code in {None, 0}:
+            return 0
+        print(f"Шаг не выполнен: {error}")
+        return error.code if isinstance(error.code, int) else 2
+    except Exception as error:
+        print(f"Шаг завершился ошибкой: {error}", file=sys.stderr)
+        return 3
+    return int(result or 0)
+
+
+def _wizard_offer_rollback(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    if not list_backups(paths):
+        print("Завершённой резервной копии пока нет; рабочая Bedolaga не изменялась.")
+        return 2
+    return _wizard_call(args, "Безопасный откат", cmd_rollback)
+
+
+def _wizard_stop_or_recover(args: argparse.Namespace, *, allow_continue: bool) -> str:
+    choices = {
+        "1": "Продолжить к следующей ступени",
+        "2": "Остановить мастер и оставить текущую ступень",
+        "3": "Поставить новые активации на паузу",
+        "4": "Выполнить безопасный откат",
+    }
+    if not allow_continue:
+        choices.pop("1")
+    selected = _choice("Что сделать дальше?", choices, default="2")
+    if selected == "3":
+        _wizard_call(args, "Пауза новых активаций", cmd_pause)
+    elif selected == "4":
+        _wizard_offer_rollback(args)
+    return selected
+
+
+def cmd_wizard(args: argparse.Namespace) -> int:
+    paths = _paths(args)
+    state = InstallationState.load(paths.state_file)
+    print("\n" + "=" * 62)
+    print("Bedolaga Continuity — автоматический мастер")
+    print("=" * 62)
+    print("Мастер сам выполнит настройку, проверку, резервное копирование и запуск.")
+    print("На безопасных контрольных точках он попросит только проверить результат.")
+    print("Отдельные команды и расширенное меню останутся доступны.")
+
+    if state.phase == "active" and state.activation_percent >= 100:
+        print("\nContinuity уже включён для 100% подходящих пользователей.")
+        return cmd_status(args)
+    if state.phase == "rollback_needs_attention":
+        print("\nПредыдущий откат требует внимания. Запустите: sudo gracebridge-rescue")
+        return 4
+    if state.phase == "paused":
+        selected = _choice(
+            "Система сейчас находится на паузе.",
+            {
+                "1": "Продолжить работу с сохранённого места",
+                "2": "Оставить на паузе и выйти",
+                "3": "Выполнить безопасный откат",
+            },
+            default="2",
+        )
+        if selected == "2":
+            return 0
+        if selected == "3":
+            return _wizard_offer_rollback(args)
+        if _wizard_call(args, "Возобновление работы", cmd_resume):
+            return 3
+        state = InstallationState.load(paths.state_file)
+
+    configured = paths.config_file.is_file() and paths.secrets_file.is_file()
+    needs_install = state.phase in {
+        "absent",
+        "backup_complete",
+        "install_failed",
+        "rolled_back",
+    }
+    if needs_install:
+        if configured:
+            print(f"\nНайдена сохранённая конфигурация: {paths.config_dir}")
+            if _confirm("Изменить её перед установкой?", default=False):
+                if _wizard_call(args, "Настройка подключения", cmd_configure):
+                    return 1
+        elif _wizard_call(args, "Настройка подключения", cmd_configure):
+            return 1
+
+        if _wizard_call(
+            args,
+            "Проверка совместимости, резервная копия и установка в выключенном режиме",
+            cmd_install,
+        ):
+            return _wizard_offer_rollback(args)
+        state = InstallationState.load(paths.state_file)
+
+    if state.phase == "installed_disabled":
+        if _wizard_call(args, "Наблюдение без изменения пользователей", cmd_observe):
+            return _wizard_offer_rollback(args)
+        state = InstallationState.load(paths.state_file)
+
+    if state.phase == "observing":
+        print("\nСледующий этап изменит только одного указанного тестового пользователя.")
+        if not _confirm("Запустить безопасный тест на одном UUID сейчас?", default=True):
+            print("Observe оставлен включённым. Позже снова запустите: sudo gracectl wizard")
+            return 0
+        if _wizard_call(args, "Тест на одном пользователе", cmd_canary):
+            return _wizard_offer_rollback(args)
+        state = InstallationState.load(paths.state_file)
+
+    if state.phase == "canary_running":
+        print("\nПроверьте тестового пользователя:")
+        print("  • после окончания подписки включился ограниченный доступ;")
+        print("  • доступны Telegram, Mini App, DNS и страница оплаты;")
+        print("  • после оплаты вернулся обычный профиль;")
+        print("  • повторная синхронизация Bedolaga не вернула Grace ошибочно.")
+        selected = _choice(
+            "Результат теста:",
+            {
+                "1": "Все проверки пройдены — продолжить",
+                "2": "Нужно больше времени — оставить canary и выйти",
+                "3": "Тест не пройден — перейти к восстановлению",
+            },
+            default="2",
+        )
+        if selected == "2":
+            print("Canary остаётся только на одном UUID. Запустите мастер позже.")
+            return 0
+        if selected == "3":
+            return _wizard_offer_rollback(args)
+        if _wizard_call(args, "Подтверждение успешного теста", cmd_approve_canary):
+            return 1
+        state = InstallationState.load(paths.state_file)
+
+    if state.phase not in {"canary_verified", "active"}:
+        print(f"\nМастер не может автоматически продолжить из состояния: {state.phase}")
+        print("Откройте расширенное меню или создайте диагностический архив.")
+        return 2
+
+    print("\nМассовое включение выполняется безопасными ступенями 5 → 25 → 50 → 100%.")
+    print("Мастер сам применяет каждую ступень; после неё можно проверить сервис, остановиться или откатить.")
+    if not _confirm("Начать или продолжить постепенное включение?", default=False):
+        print("Текущий безопасный этап сохранён. Запустите мастер позже.")
+        return 0
+
+    while state.activation_percent < 100:
+        next_percent = next(step for step in ROLLOUT_STEPS if step > state.activation_percent)
+        if _wizard_call(
+            args,
+            f"Включение для {next_percent}% подходящих пользователей",
+            cmd_activate,
+            percent=next_percent,
+        ):
+            return _wizard_offer_rollback(args)
+        state = InstallationState.load(paths.state_file)
+        if state.activation_percent >= 100:
+            break
+        print(f"\nСтупень {state.activation_percent}% активна.")
+        print("Проверьте ошибки Bedolaga, Remnawave, оплату и обращения пользователей.")
+        selected = _wizard_stop_or_recover(args, allow_continue=True)
+        if selected != "1":
+            return 0
+
+    print("\nГотово: Continuity включён для 100% подходящих пользователей.")
+    print("Безопасный откат и отдельные команды по-прежнему доступны в меню.")
+    return 0
+
+
+def cmd_advanced_menu(args: argparse.Namespace) -> int:
     while True:
         paths = _paths(args)
         try:
@@ -683,7 +891,7 @@ def cmd_menu(args: argparse.Namespace) -> int:
 
         pause_label = "Продолжить работу" if phase == "paused" else "Поставить на паузу"
         print("\n" + "=" * 62)
-        print("Bedolaga Continuity — мастер управления")
+        print("Bedolaga Continuity — расширенное управление")
         print(f"Текущее состояние: {phase}")
         print("=" * 62)
         print("  1. Настроить подключение и ограниченный доступ")
@@ -733,6 +941,52 @@ def cmd_menu(args: argparse.Namespace) -> int:
             input("\nНажмите Enter, чтобы вернуться в меню...")
 
 
+def cmd_menu(args: argparse.Namespace) -> int:
+    while True:
+        paths = _paths(args)
+        try:
+            state = InstallationState.load(paths.state_file)
+            phase = state.phase
+        except Exception as error:
+            phase = f"ошибка состояния: {error}"
+        pause_label = "Продолжить работу" if phase == "paused" else "Поставить на паузу"
+        print("\n" + "=" * 62)
+        print("Bedolaga Continuity")
+        print(f"Текущее состояние: {phase}")
+        print("=" * 62)
+        print("  1. Автоматическая настройка и запуск (рекомендуется)")
+        print("  2. Показать состояние")
+        print(f"  3. {pause_label}")
+        print("  4. Безопасный откат")
+        print("  5. Расширенное управление и отдельные этапы")
+        print("  0. Выход")
+        choice = input("Выберите действие [1]: ").strip() or "1"
+        if choice == "0":
+            return 0
+        actions = {
+            "1": cmd_wizard,
+            "2": cmd_status,
+            "3": cmd_resume if phase == "paused" else cmd_pause,
+            "4": cmd_rollback,
+            "5": cmd_advanced_menu,
+        }
+        handler = actions.get(choice)
+        if handler is None:
+            print("Неизвестный пункт меню.")
+            continue
+        try:
+            handler(_menu_args(args, guided=choice == "1"))
+        except KeyboardInterrupt:
+            print("\nДействие отменено.")
+        except SystemExit as error:
+            if error.code not in {None, 0}:
+                print(f"Действие не выполнено: {error}")
+        except Exception as error:
+            print(f"Действие завершилось ошибкой: {error}", file=sys.stderr)
+        if sys.stdin.isatty():
+            input("\nНажмите Enter, чтобы вернуться в меню...")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="gracectl", description="Bedolaga Continuity")
     parser.add_argument("--version", action="version", version=__version__)
@@ -743,6 +997,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command")
     commands = {
         "menu": cmd_menu,
+        "wizard": cmd_wizard,
         "configure": cmd_configure,
         "preflight": cmd_preflight,
         "status": cmd_status,

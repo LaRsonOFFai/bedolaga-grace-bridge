@@ -76,25 +76,9 @@ if [[ ! -f /etc/bedolaga-grace-bridge/secrets.env ]]; then
 fi
 
 echo "Bedolaga Grace Bridge ${VERSION} установлен. Ни один пользователь не изменён."
-if [[ ! -f /etc/bedolaga-grace-bridge/config.env ]]; then
-  echo "Запускается мастер конфигурации. Он только создаёт локальные файлы."
-  gracectl configure
-fi
-
-echo
-echo "Выполняется read-only проверка совместимости."
-if ! gracectl preflight; then
-  echo
-  echo "Проверка не пройдена. Рабочая Bedolaga не изменялась."
-  echo "После исправления выполните: sudo gracectl preflight"
-  exit 2
-fi
-
-echo
-echo "Проверка пройдена. Ничего ещё не включено для пользователей."
 if [[ -t 0 && -t 1 ]]; then
-  echo "Открывается мастер управления."
-  gracectl menu
+  echo "Запускается автоматический мастер настройки и безопасного включения."
+  gracectl wizard
 else
-  echo "Для открытия мастера выполните: sudo gracectl menu"
+  echo "Для запуска мастера выполните: sudo gracectl wizard"
 fi
