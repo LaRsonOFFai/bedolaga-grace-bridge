@@ -6,6 +6,7 @@ import getpass
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from . import __version__
 from .backup import create_backup, list_backups
@@ -21,6 +22,14 @@ from .deploy import (
 from .detect import discover_bedolaga_dir, discover_compose_file
 from .diagnostics import create_bundle
 from .drain import drain_grace
+from .panel_admin import PanelAdminClient, PanelApiError, PanelInbound, PanelSquad
+from .panel_discovery import (
+    PanelCandidate,
+    candidate_from_bedolaga_env,
+    discover_local_panels,
+    merge_candidates,
+    normalize_panel_url,
+)
 from .patcher import prepare_candidate
 from .preflight import run_preflight
 from .rollback import safe_rollback
@@ -80,6 +89,153 @@ def _first(values: dict[str, str], *keys: str) -> str:
     return ""
 
 
+def _confirm(prompt: str, *, default: bool = False) -> bool:
+    marker = "Y/n" if default else "y/N"
+    answer = input(f"{prompt} [{marker}] ").strip().lower()
+    if not answer:
+        return default
+    return answer in {"y", "yes", "д", "да"}
+
+
+def _panel_label(candidate: PanelCandidate) -> str:
+    suffix = f", контейнер {candidate.container_name}" if candidate.container_name else ""
+    return f"{candidate.url} ({candidate.source}{suffix})"
+
+
+def _confirm_panel_url(url: str, *, local: bool) -> bool:
+    parsed = urlsplit(url)
+    loopback = parsed.hostname in {"localhost", "127.0.0.1", "::1"}
+    if parsed.scheme == "http" and not local and not loopback:
+        print("Внимание: удалённый HTTP не шифрует API-ключ Remnawave.")
+        if not _confirm("Всё равно использовать этот HTTP-адрес?", default=False):
+            return False
+    return _confirm(f"Использовать {url}?", default=True)
+
+
+def _choose_panel_url(source_env: dict[str, str]) -> str:
+    from_bedolaga = candidate_from_bedolaga_env(source_env)
+    candidates = merge_candidates(
+        [from_bedolaga] if from_bedolaga else [],
+        discover_local_panels(),
+    )
+    if candidates:
+        print("\nОбнаружены возможные панели Remnawave:")
+        for number, candidate in enumerate(candidates, 1):
+            print(f"  {number}. {_panel_label(candidate)}")
+        print("  0. Указать другой адрес")
+        while True:
+            raw = input("Выберите панель [1]: ").strip() or "1"
+            if raw == "0":
+                break
+            if raw.isdigit() and 1 <= int(raw) <= len(candidates):
+                selected = candidates[int(raw) - 1]
+                if _confirm_panel_url(selected.url, local=selected.local):
+                    return selected.url
+                break
+            print("Введите номер из списка.")
+    else:
+        print("\nЛокальная панель и адрес в Bedolaga не обнаружены.")
+    while True:
+        raw = _ask("Корневой URL панели Remnawave (например, https://panel.example.com)")
+        try:
+            selected = normalize_panel_url(raw)
+        except ValueError as error:
+            print(f"Ошибка: {error}")
+            continue
+        if not selected:
+            print("Укажите адрес панели.")
+            continue
+        if _confirm_panel_url(selected, local=False):
+            return selected
+
+
+def _select_numbers(prompt: str, maximum: int) -> list[int]:
+    while True:
+        raw = input(prompt).strip()
+        try:
+            selected = sorted({int(item.strip()) for item in raw.split(",") if item.strip()})
+        except ValueError:
+            selected = []
+        if selected and all(1 <= number <= maximum for number in selected):
+            return selected
+        print("Укажите один или несколько номеров через запятую.")
+
+
+def _show_inbound(number: int, inbound: PanelInbound) -> None:
+    details = "/".join(item for item in (inbound.protocol, inbound.network, inbound.security) if item)
+    port = f":{inbound.port}" if inbound.port is not None else ""
+    print(f"  {number}. {inbound.tag}{port} — {details or 'без описания'}")
+
+
+def _manual_squad_uuid(default: str = "") -> str:
+    from uuid import UUID
+
+    while True:
+        value = _ask("UUID internal squad для Continuity", default)
+        try:
+            return str(UUID(value))
+        except ValueError:
+            print("Некорректный UUID.")
+
+
+def _select_or_create_squad(
+    client: PanelAdminClient,
+) -> tuple[PanelSquad, bool]:
+    squads = client.list_internal_squads()
+    print("\nНастройка Continuity internal squad:")
+    if squads:
+        print("  1. Выбрать существующий squad")
+        print("  2. Создать отдельный squad автоматически")
+        print("  3. Ввести UUID вручную")
+        while True:
+            choice = input("Выберите действие [1]: ").strip() or "1"
+            if choice in {"1", "2", "3"}:
+                break
+            print("Введите 1, 2 или 3.")
+    else:
+        print("Существующие internal squads не найдены.")
+        print("  1. Создать отдельный squad автоматически")
+        print("  2. Ввести UUID вручную")
+        while True:
+            raw = input("Выберите действие [1]: ").strip() or "1"
+            if raw in {"1", "2"}:
+                break
+            print("Введите 1 или 2.")
+        choice = "2" if raw == "1" else "3"
+
+    if choice == "1" and squads:
+        for number, squad in enumerate(squads, 1):
+            print(f"  {number}. {squad.name} ({len(squad.inbound_uuids)} inbound)")
+        number = _select_numbers("Номер squad: ", len(squads))[0]
+        return squads[number - 1], False
+
+    if choice == "2":
+        inbounds = client.list_inbounds()
+        if not inbounds:
+            raise PanelApiError("В панели нет доступных inbound для нового internal squad")
+        print("\nВыберите inbound ограниченного доступа:")
+        for number, inbound in enumerate(inbounds, 1):
+            _show_inbound(number, inbound)
+        selected = _select_numbers("Номера inbound через запятую: ", len(inbounds))
+        selected_inbounds = [inbounds[number - 1] for number in selected]
+        name = _ask("Название нового squad", "Continuity Access")
+        if not 2 <= len(name) <= 30 or any(
+            character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_ -"
+            for character in name
+        ):
+            raise PanelApiError("Название squad должно содержать 2–30 латинских символов, цифр, _ или -")
+        print("\nБудет создан internal squad:")
+        print(f"  Название: {name}")
+        print("  Inbound: " + ", ".join(item.tag for item in selected_inbounds))
+        if not _confirm("Создать этот объект в Remnawave?", default=False):
+            raise PanelApiError("Создание internal squad отменено")
+        created = client.create_internal_squad(name, [item.uuid for item in selected_inbounds])
+        print(f"Internal squad создан: {created.name}")
+        return created, True
+
+    return PanelSquad(_manual_squad_uuid(), "Введён вручную", ()), False
+
+
 def cmd_configure(args: argparse.Namespace) -> int:
     paths = _paths(args)
     if paths.config_file.exists() or paths.secrets_file.exists():
@@ -132,8 +288,7 @@ def cmd_configure(args: argparse.Namespace) -> int:
     else:
         database_dsn = getpass.getpass("DATABASE_DSN (ввод скрыт): ").strip()
 
-    detected_url = _first(source_env, "REMNAWAVE_API_URL")
-    remnawave_url = _ask("URL Remnawave API", detected_url)
+    remnawave_url = _choose_panel_url(source_env)
     detected_key = _first(source_env, "REMNAWAVE_API_KEY")
     if (
         detected_key
@@ -142,13 +297,32 @@ def cmd_configure(args: argparse.Namespace) -> int:
         remnawave_key = detected_key
     else:
         remnawave_key = getpass.getpass("Remnawave API key (ввод скрыт): ").strip()
-    squad_uuid = _ask("UUID internal squad для Grace")
-    duration = _ask("Срок Grace в днях", "7")
-    traffic_gb = _ask("Лимит Grace в GiB", "1")
+    if not remnawave_key:
+        raise SystemExit("Remnawave API key не указан")
+
+    duration = _ask("Срок ограниченного доступа в днях", "7")
+    traffic_gb = _ask("Лимит ограниченного доступа в GiB", "1")
     try:
+        duration_days = int(duration)
         traffic_bytes = int(float(traffic_gb) * 1024**3)
     except ValueError as error:
-        raise SystemExit("Некорректный лимит трафика") from error
+        raise SystemExit("Срок и лимит трафика должны быть числами") from error
+    if duration_days < 1 or traffic_bytes < 1:
+        raise SystemExit("Срок и лимит трафика должны быть больше нуля")
+
+    client = PanelAdminClient(remnawave_url, remnawave_key)
+    created_squad: PanelSquad | None = None
+    try:
+        client.health()
+        print("Подключение к Remnawave проверено.")
+        squad, created = _select_or_create_squad(client)
+        if created:
+            created_squad = squad
+    except PanelApiError as error:
+        print(f"Не удалось завершить автоматическую настройку: {error}")
+        if not _confirm("Продолжить и указать UUID internal squad вручную?", default=False):
+            raise SystemExit("Настройка остановлена без изменения локальной конфигурации") from error
+        squad = PanelSquad(_manual_squad_uuid(), "Введён вручную", ())
 
     public = {
         "BEDOLAGA_DIR": str(bedolaga_dir),
@@ -157,8 +331,8 @@ def cmd_configure(args: argparse.Namespace) -> int:
         "DATABASE_SERVICE": database_service,
         "DATABASE_NAME": database_name,
         "DATABASE_USER": database_user,
-        "GRACE_SQUAD_UUID": squad_uuid,
-        "GRACE_DURATION_DAYS": duration,
+        "GRACE_SQUAD_UUID": squad.uuid,
+        "GRACE_DURATION_DAYS": str(duration_days),
         "GRACE_TRAFFIC_LIMIT_BYTES": str(traffic_bytes),
         "CANDIDATE_BATCH_SIZE": "500",
         "COMMAND_WORKERS": "4",
@@ -171,8 +345,47 @@ def cmd_configure(args: argparse.Namespace) -> int:
         "REMNAWAVE_API_KEY": remnawave_key,
         "CANARY_REMNAWAVE_UUID": "",
     }
-    _atomic_env_update(paths.config_file, public)
-    _atomic_env_update(paths.secrets_file, secrets)
+    print("\nИтоговая конфигурация:")
+    print(f"  Bedolaga: {bedolaga_dir}")
+    print(f"  Remnawave: {remnawave_url}")
+    print(f"  Internal squad: {squad.name} ({squad.uuid})")
+    print(f"  Ограниченный доступ: {duration_days} дн., {traffic_gb} GiB")
+    print("  API key и пароль базы скрыты")
+    if not _confirm("Сохранить эту конфигурацию?", default=True):
+        if created_squad:
+            try:
+                client.delete_internal_squad(created_squad.uuid)
+                print("Созданный internal squad удалён, так как настройка отменена.")
+            except PanelApiError as cleanup_error:
+                print(f"Не удалось удалить созданный internal squad: {cleanup_error}", file=sys.stderr)
+        print("Локальная конфигурация не изменена.")
+        return 1
+
+    previous_config = paths.config_file.read_bytes() if paths.config_file.exists() else None
+    previous_secrets = paths.secrets_file.read_bytes() if paths.secrets_file.exists() else None
+    try:
+        _atomic_env_update(paths.config_file, public)
+        _atomic_env_update(paths.secrets_file, secrets)
+        state = InstallationState.load(paths.state_file)
+        state.update(
+            bridge_version=__version__,
+            managed_squad_uuid=created_squad.uuid if created_squad else None,
+        ).save(paths.state_file)
+    except Exception:
+        for path, previous in (
+            (paths.config_file, previous_config),
+            (paths.secrets_file, previous_secrets),
+        ):
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(previous)
+        if created_squad:
+            try:
+                client.delete_internal_squad(created_squad.uuid)
+            except PanelApiError as cleanup_error:
+                print(f"Не удалось удалить созданный internal squad: {cleanup_error}", file=sys.stderr)
+        raise
     print(f"Конфигурация сохранена в {paths.config_dir}. Секреты не выводились в терминал.")
     return 0
 
@@ -232,6 +445,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         backup = create_backup(config, paths, record)
         state.update(
             phase="backup_complete",
+            bridge_version=__version__,
             backup_id=backup.backup_id,
             bedolaga_version=record.version,
             bedolaga_commit=record.commit,
@@ -452,14 +666,83 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     return 0
 
 
+def _menu_args(args: argparse.Namespace, **overrides: object) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+def cmd_menu(args: argparse.Namespace) -> int:
+    while True:
+        paths = _paths(args)
+        try:
+            state = InstallationState.load(paths.state_file)
+            phase = state.phase
+        except Exception as error:
+            phase = f"ошибка состояния: {error}"
+
+        pause_label = "Продолжить работу" if phase == "paused" else "Поставить на паузу"
+        print("\n" + "=" * 62)
+        print("Bedolaga Continuity — мастер управления")
+        print(f"Текущее состояние: {phase}")
+        print("=" * 62)
+        print("  1. Настроить подключение и ограниченный доступ")
+        print("  2. Проверить совместимость (без изменений)")
+        print("  3. Создать бэкап и установить в выключенном режиме")
+        print("  4. Запустить наблюдение без изменений пользователей")
+        print("  5. Запустить тест на одном пользователе")
+        print("  6. Подтвердить успешный тест")
+        print("  7. Перейти на следующую ступень включения")
+        print("  8. Показать состояние")
+        print(f"  9. {pause_label}")
+        print(" 10. Создать обезличенный диагностический архив")
+        print(" 11. Безопасный откат")
+        print("  0. Выход")
+        choice = input("Выберите действие: ").strip()
+        if choice == "0":
+            return 0
+
+        actions = {
+            "1": (cmd_configure, {}),
+            "2": (cmd_preflight, {}),
+            "3": (cmd_install, {}),
+            "4": (cmd_observe, {}),
+            "5": (cmd_canary, {}),
+            "6": (cmd_approve_canary, {}),
+            "7": (cmd_activate, {"percent": None}),
+            "8": (cmd_status, {}),
+            "9": (cmd_resume if phase == "paused" else cmd_pause, {}),
+            "10": (cmd_bundle, {}),
+            "11": (cmd_rollback, {}),
+        }
+        selected = actions.get(choice)
+        if selected is None:
+            print("Неизвестный пункт меню.")
+            continue
+        handler, overrides = selected
+        try:
+            handler(_menu_args(args, **overrides))
+        except KeyboardInterrupt:
+            print("\nДействие отменено.")
+        except SystemExit as error:
+            if error.code not in {None, 0}:
+                print(f"Действие не выполнено: {error}")
+        except Exception as error:
+            print(f"Действие завершилось ошибкой: {error}", file=sys.stderr)
+        if sys.stdin.isatty():
+            input("\nНажмите Enter, чтобы вернуться в меню...")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="gracectl", description="Bedolaga Grace Bridge")
+    parser = argparse.ArgumentParser(prog="gracectl", description="Bedolaga Continuity")
     parser.add_argument("--version", action="version", version=__version__)
     parser.add_argument("--config-dir", default="/etc/bedolaga-grace-bridge")
     parser.add_argument("--state-dir", default="/var/lib/bedolaga-grace-bridge")
     parser.add_argument("--log-dir", default="/var/log/bedolaga-grace-bridge")
-    sub = parser.add_subparsers(dest="command", required=True)
+    parser.set_defaults(handler=cmd_menu)
+    sub = parser.add_subparsers(dest="command")
     commands = {
+        "menu": cmd_menu,
         "configure": cmd_configure,
         "preflight": cmd_preflight,
         "status": cmd_status,

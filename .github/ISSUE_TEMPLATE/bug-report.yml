@@ -1,5 +1,5 @@
 name: Ошибка
-description: Сообщить об ошибке Bedolaga Grace Bridge
+description: Сообщить об ошибке Bedolaga Continuity
 body:
   - type: markdown
     attributes:

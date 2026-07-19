@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bedolaga-grace-bridge"
-version = "0.1.0"
-description = "Безопасный мост Grace-доступа между Bedolaga и Remnawave"
+version = "0.2.0"
+description = "Управляемое сохранение ограниченного доступа для Bedolaga и Remnawave"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

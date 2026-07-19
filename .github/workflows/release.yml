@@ -45,5 +45,5 @@ jobs:
           SHA256SUMS
           --verify-tag
           --prerelease
-          --title "Bedolaga Grace Bridge ${GITHUB_REF_NAME}"
+          --title "Bedolaga Continuity ${GITHUB_REF_NAME}"
           --generate-notes

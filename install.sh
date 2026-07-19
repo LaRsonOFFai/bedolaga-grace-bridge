@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 umask 077
 
-VERSION="${BEDOLAGA_GRACE_BRIDGE_VERSION:-0.1.0}"
+VERSION="${BEDOLAGA_GRACE_BRIDGE_VERSION:-0.2.0}"
 REPOSITORY="${BEDOLAGA_GRACE_BRIDGE_REPOSITORY:-LaRsonOFFai/bedolaga-grace-bridge}"
 PREFIX="${BEDOLAGA_GRACE_BRIDGE_PREFIX:-/opt/bedolaga-grace-bridge}"
 RELEASE_DIR="${PREFIX}/releases/${VERSION}"
@@ -91,5 +91,10 @@ if ! gracectl preflight; then
 fi
 
 echo
-echo "Проверка пройдена. Для создания бэкапа и выключенного кандидата:"
-echo "  sudo gracectl install"
+echo "Проверка пройдена. Ничего ещё не включено для пользователей."
+if [[ -t 0 && -t 1 ]]; then
+  echo "Открывается мастер управления."
+  gracectl menu
+else
+  echo "Для открытия мастера выполните: sudo gracectl menu"
+fi
