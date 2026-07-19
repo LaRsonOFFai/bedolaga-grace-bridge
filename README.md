@@ -1,5 +1,7 @@
 # Bedolaga Continuity
 
+![Bedolaga Continuity — подписка закончилась, связь остаётся](docs/assets/bedolaga-continuity-social-preview.jpg)
+
 **Подписка закончилась — связь с клиентом остаётся.**
 
 Bedolaga Continuity помогает не терять пользователя в самый неудобный момент. Вместо полного
