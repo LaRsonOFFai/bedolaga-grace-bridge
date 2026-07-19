@@ -1,0 +1,14 @@
+Bedolaga Grace Bridge is an independent project and is not an official
+component of Bedolaga or Remnawave.
+
+The original bridge code in this repository is licensed under the MIT License.
+
+Version-specific files under patches/bedolaga/ may contain derived portions of
+BEDOLAGA-DEV/remnawave-bedolaga-telegram-bot. Such files retain the upstream
+copyright notices and are governed by the upstream MIT License with the
+Commons Clause License Condition v1.0. See patches/bedolaga/LICENSE.
+
+The project addresses a problem similar to
+https://github.com/zavul0nn/remnawave-grace-access but does not copy its source
+code. At the time this repository was created, that project did not publish an
+explicit license.

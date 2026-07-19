@@ -1,0 +1,6 @@
+*
+!pyproject.toml
+!LICENSE
+!README.md
+!src/
+!src/**

@@ -1,0 +1,31 @@
+name: Ошибка
+description: Сообщить об ошибке Bedolaga Grace Bridge
+body:
+  - type: markdown
+    attributes:
+      value: Не публикуйте API-ключи и `.env`. Создайте архив через `sudo gracectl bundle`.
+  - type: input
+    id: version
+    attributes:
+      label: Версия Bridge
+    validations:
+      required: true
+  - type: input
+    id: bedolaga
+    attributes:
+      label: Версия Bedolaga
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Режим
+      options: [preflight, install, observe, canary, active, rollback]
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Что произошло
+    validations:
+      required: true

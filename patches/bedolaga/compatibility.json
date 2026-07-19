@@ -1,0 +1,22 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-07-19T00:00:00Z",
+  "minimumSupportedVersion": "v3.64.0",
+  "supported": [
+    {
+      "version": "v3.64.0",
+      "commit": "a0efb0597077732991c5b92943597dd1f38dff78",
+      "status": "canary",
+      "patch": "patches/bedolaga/v3.64.0/bedolaga-grace-bridge.patch",
+      "patchSha256": "b91e4dd4211026a75ba89df63cb5cba291963d005d0b48e657d790d5181ffe1c",
+      "files": {
+        ".env.example": "5d9367daac00b75facf6720bf68afd74c5fe0341a8ce4c3fdac8446dbe373419",
+        "app/config.py": "03f35e746ac1bcdf2734af544e6ab8bff392239ce9857a3d3347dcdc60b2ad19",
+        "app/cabinet/routes/admin_users.py": "9868aa30f94c22a88696ddbe27ed0695fce21ba27b0b98acffb146b9c388a061",
+        "app/services/remnawave_service.py": "efcbb9366768c60ea15aebc40885a2aef507fd9a0c6a0513cefb8ba3717de632",
+        "app/services/remnawave_webhook_service.py": "9b90f748167ac149833302d2112302d20f6411fc2e3f36ef547a8b538e1cffe6",
+        "app/services/subscription_service.py": "2649ff6973f4ea27dae7a0b7c581f549681301cb826025ee3b42e5fb3187a326"
+      }
+    }
+  ]
+}

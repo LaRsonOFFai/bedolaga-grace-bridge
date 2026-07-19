@@ -1,0 +1,49 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: ruff check src tests scripts
+      - run: ruff format --check src tests scripts
+      - run: pytest -q
+      - run: python scripts/verify_compatibility.py
+      - name: Build verified source assets
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          version="$(python -c 'from bedolaga_grace_bridge import __version__; print(__version__)')"
+          test "${GITHUB_REF_NAME}" = "v${version}"
+          asset="bedolaga-grace-bridge-${version}.tar.gz"
+          git archive --format=tar.gz --prefix="bedolaga-grace-bridge-${version}/" -o "${asset}" HEAD
+          sha256sum "${asset}" > "${asset}.sha256"
+          sha256sum install.sh "${asset}" > SHA256SUMS
+      - name: Publish GitHub pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${GITHUB_REF_NAME}"
+          install.sh
+          "bedolaga-grace-bridge-${GITHUB_REF_NAME#v}.tar.gz"
+          "bedolaga-grace-bridge-${GITHUB_REF_NAME#v}.tar.gz.sha256"
+          SHA256SUMS
+          --verify-tag
+          --prerelease
+          --title "Bedolaga Grace Bridge ${GITHUB_REF_NAME}"
+          --generate-notes

@@ -1,0 +1,42 @@
+name: Isolated PostgreSQL load test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-40000:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: grace_bridge_loadtest
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d grace_bridge_loadtest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e '.[dev]'
+      - run: python scripts/load_test_postgres.py --users 40000 --batch-size 500
+        env:
+          LOAD_TEST_DATABASE_DSN: postgresql://postgres:postgres@127.0.0.1:5432/grace_bridge_loadtest
+          GRACE_LOAD_TEST_CONFIRM: ISOLATED_GRACE_BRIDGE_LOADTEST
+      - run: python scripts/load_test_workers.py
+        env:
+          LOAD_TEST_DATABASE_DSN: postgresql://postgres:postgres@127.0.0.1:5432/grace_bridge_loadtest
+          GRACE_LOAD_TEST_CONFIRM: ISOLATED_GRACE_BRIDGE_LOADTEST

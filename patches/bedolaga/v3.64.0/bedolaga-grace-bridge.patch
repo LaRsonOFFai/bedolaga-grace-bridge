@@ -1,0 +1,358 @@
+diff --git a/.env.example b/.env.example
+--- a/.env.example
++++ b/.env.example
+@@ -170,6 +170,11 @@ CART_TTL_SECONDS=3600
+ REMNAWAVE_API_URL=https://panel.example.com
+ REMNAWAVE_API_KEY=your_api_key_here
+ 
++# Optional external Grace Bridge integration. Keep disabled until the
++# standalone schema and controller have been deployed and verified.
++GRACE_INTEGRATION_ENABLED=false
++GRACE_LOCK_NAMESPACE=1196573509
++
+ # Тип авторизации: "api_key", "basic_auth", "caddy"
+ REMNAWAVE_AUTH_TYPE=api_key
+ REMNAWAVE_CADDY_TOKEN=
+diff --git a/app/config.py b/app/config.py
+--- a/app/config.py
++++ b/app/config.py
+@@ -168,6 +168,11 @@ class Settings(BaseSettings):
+     REMNAWAVE_WEBHOOK_NODE_COALESCE_WINDOW_SECONDS: float = 10.0
+     REMNAWAVE_WEBHOOK_NODE_BUFFER_MAX: int = 500
+ 
++    # External Grace Bridge integration. Disabled by default: without the
++    # feature flag all call sites retain their upstream behaviour.
++    GRACE_INTEGRATION_ENABLED: bool = False
++    GRACE_LOCK_NAMESPACE: int = 1196573509
++
+     # Webhook user notification toggles (what Telegram messages users receive from webhook events)
+     WEBHOOK_NOTIFY_USER_ENABLED: bool = True
+     WEBHOOK_NOTIFY_SUB_STATUS: bool = True
+diff --git a/app/services/remnawave_service.py b/app/services/remnawave_service.py
+--- a/app/services/remnawave_service.py
++++ b/app/services/remnawave_service.py
+@@ -2249,6 +2249,21 @@ class RemnaWaveService:
+                 await self._create_subscription_from_panel_data(db, user, panel_user)
+                 return
+ 
++            from app.services.grace_integration_service import (
++                acquire_grace_subscription_lock,
++                grace_owns_panel_access,
++            )
++
++            await acquire_grace_subscription_lock(db, subscription.id)
++            await db.refresh(subscription)
++            if await grace_owns_panel_access(db, subscription.id):
++                logger.info(
++                    'Skipped panel-to-bot subscription sync while Grace owns panel access',
++                    subscription_id=subscription.id,
++                    user_id=user.id,
++                )
++                return
++
+             # Skip if recently updated by webhook (prevent stale data overwrite)
+             if is_recently_updated_by_webhook(subscription):
+                 logger.debug(
+diff --git a/app/services/remnawave_webhook_service.py b/app/services/remnawave_webhook_service.py
+--- a/app/services/remnawave_webhook_service.py
++++ b/app/services/remnawave_webhook_service.py
+@@ -36,6 +36,10 @@ from app.database.crud.user import get_user_by_id, get_user_by_remnawave_uuid, g
+ from app.database.models import Subscription, SubscriptionServer, SubscriptionStatus, User
+ from app.localization.texts import get_texts
+ from app.services.admin_notification_service import AdminNotificationService
++from app.services.grace_integration_service import (
++    acquire_grace_subscription_lock,
++    should_ignore_panel_event_during_grace,
++)
+ from app.services.notification_delivery_service import NotificationType, notification_delivery_service
+ from app.utils.miniapp_buttons import build_miniapp_or_callback_button
+ 
+@@ -366,6 +370,19 @@ class RemnaWaveWebhookService:
+             )
+             return False
+ 
++        if subscription is not None:
++            await acquire_grace_subscription_lock(db, subscription.id)
++            await db.refresh(subscription)
++            if await should_ignore_panel_event_during_grace(db, subscription.id, event_name):
++                await db.commit()
++                logger.info(
++                    'Skipped RemnaWave webhook fields owned by Grace',
++                    event_name=event_name,
++                    subscription_id=subscription.id,
++                    user_id=user.id,
++                )
++                return True
++
+         user_id = user.id
+         try:
+             await handler(db, user, subscription, data)
+diff --git a/app/services/subscription_service.py b/app/services/subscription_service.py
+--- a/app/services/subscription_service.py
++++ b/app/services/subscription_service.py
+@@ -12,6 +12,11 @@ from app.database.crud.server_squad import get_all_server_squads
+ from app.database.crud.user import get_user_by_id
+ from app.database.models import Subscription, SubscriptionStatus, User
+ from app.external.remnawave_api import RemnaWaveAPI, RemnaWaveAPIError, RemnaWaveUser, TrafficLimitStrategy, UserStatus
++from app.services.grace_integration_service import (
++    acquire_grace_subscription_lock,
++    grace_owns_panel_access,
++    invalidate_grace_for_paid_access,
++)
+ from app.utils.subscription_utils import (
+     resolve_hwid_device_limit_for_payload,
+ )
+@@ -172,12 +177,22 @@ class SubscriptionService:
+                 logger.error('Ошибка валидации подписки для пользователя', _format_user_log=self._format_user_log(user))
+                 return None
+ 
++            await acquire_grace_subscription_lock(db, subscription.id)
++            await db.refresh(subscription)
++
+             # Загружаем tariff заранее, чтобы избежать lazy loading в async контексте
+             try:
+                 await db.refresh(subscription, ['tariff'])
+             except Exception:
+                 pass  # tariff может быть None или уже загружен
+ 
++            current_time = datetime.now(UTC)
++            if (
++                subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
++                and subscription.end_date > current_time
++            ):
++                await invalidate_grace_for_paid_access(db, subscription.id)
++
+             user_tag = self._resolve_user_tag(subscription)
+ 
+             # Определяем внешний сквад из тарифа
+@@ -436,6 +451,9 @@ class SubscriptionService:
+                 logger.error('RemnaWave UUID не найден для пользователя', user_id=subscription.user_id)
+                 return None
+ 
++            await acquire_grace_subscription_lock(db, subscription.id)
++            await db.refresh(subscription)
++
+             # Загружаем tariff заранее, чтобы избежать lazy loading в async контексте
+             try:
+                 await db.refresh(subscription, ['tariff'])
+@@ -450,6 +468,21 @@ class SubscriptionService:
+                 and subscription.end_date > current_time
+             )
+ 
++            if is_actually_active:
++                await invalidate_grace_for_paid_access(db, subscription.id)
++            elif await grace_owns_panel_access(db, subscription.id):
++                # Grace owns status/expire/limit/squads while the paid
++                # subscription remains expired. Old retry jobs become a no-op.
++                async with self.get_api_client() as api:
++                    current_panel_user = await api.get_user_by_uuid(remnawave_uuid)
++                await db.commit()
++                logger.info(
++                    'Skipped Bedolaga panel overwrite while Grace owns access',
++                    subscription_id=subscription.id,
++                    remnawave_uuid=remnawave_uuid,
++                )
++                return current_panel_user
++
+             # Логируем если статус и end_date не согласованы (для отладки)
+             if (
+                 subscription.status in (SubscriptionStatus.ACTIVE.value, SubscriptionStatus.TRIAL.value)
+diff --git a/app/cabinet/routes/admin_users.py b/app/cabinet/routes/admin_users.py
+--- a/app/cabinet/routes/admin_users.py
++++ b/app/cabinet/routes/admin_users.py
+@@ -3571,6 +3571,23 @@ async def sync_user_from_panel(
+             # Update subscription if requested
+             # Use explicitly selected subscription or fall back to first-active
+             sync_sub = selected_sub or next((s for s in from_subs if s.is_active), from_subs[0] if from_subs else None)
++            if sync_sub:
++                from app.services.grace_integration_service import (
++                    acquire_grace_subscription_lock,
++                    grace_owns_panel_access,
++                )
++
++                await acquire_grace_subscription_lock(db, sync_sub.id)
++                await db.refresh(sync_sub)
++                if await grace_owns_panel_access(db, sync_sub.id):
++                    await db.rollback()
++                    return SyncFromPanelResponse(
++                        success=False,
++                        message='Sync blocked: Grace currently owns panel access for this expired subscription',
++                        panel_user=panel_info,
++                        changes={},
++                        errors=['Deactivate Grace or renew the paid subscription before manual synchronization'],
++                    )
+             if request.update_subscription and sync_sub:
+                 sub = sync_sub
+ 
+@@ -3762,6 +3779,26 @@ async def sync_user_to_panel(
+             )
+ 
+         sub = push_sub
++        from app.services.grace_integration_service import (
++            acquire_grace_subscription_lock,
++            grace_owns_panel_access,
++        )
++
++        await acquire_grace_subscription_lock(db, sub.id)
++        await db.refresh(sub)
++        if await grace_owns_panel_access(db, sub.id):
++            await db.commit()
++            return SyncToPanelResponse(
++                success=False,
++                message='Sync blocked: Grace currently owns panel access for this expired subscription',
++                action='grace_protected',
++                panel_uuid=(
++                    sub.remnawave_uuid
++                    if settings.is_multi_tariff_enabled() and sub.remnawave_uuid
++                    else user.remnawave_uuid
++                ),
++                errors=['Deactivate Grace or renew the paid subscription before manual synchronization'],
++            )
+         changes = {}
+         errors = []
+         action = 'no_changes'
+diff --git a/app/services/grace_integration_service.py b/app/services/grace_integration_service.py
+new file mode 100644
+--- /dev/null
++++ b/app/services/grace_integration_service.py
+@@ -0,0 +1,140 @@
++"""Coordination helpers for the external Bedolaga Grace Bridge.
++
++The module is a strict no-op while GRACE_INTEGRATION_ENABLED is false. Bridge
++state lives in its own PostgreSQL schema and never touches Bedolaga Alembic.
++"""
++
++from __future__ import annotations
++
++from dataclasses import dataclass
++from datetime import UTC, datetime
++
++import structlog
++from sqlalchemy import text
++from sqlalchemy.ext.asyncio import AsyncSession
++
++from app.config import settings
++
++
++logger = structlog.get_logger(__name__)
++GRACE_PANEL_OWNED_STATES = frozenset({'pending_activate', 'active', 'exhausted', 'failed'})
++
++
++@dataclass(frozen=True, slots=True)
++class GraceState:
++    state: str
++    generation: int
++
++    @property
++    def owns_panel_access(self) -> bool:
++        return self.state in GRACE_PANEL_OWNED_STATES
++
++
++def is_grace_integration_enabled() -> bool:
++    return bool(settings.GRACE_INTEGRATION_ENABLED)
++
++
++async def acquire_grace_subscription_lock(db: AsyncSession, subscription_id: int) -> None:
++    if not is_grace_integration_enabled():
++        return
++    bind = db.get_bind()
++    if bind.dialect.name != 'postgresql':
++        logger.warning(
++            'Grace advisory lock is unavailable for a non-PostgreSQL database',
++            subscription_id=subscription_id,
++            dialect=bind.dialect.name,
++        )
++        return
++    result = await db.execute(
++        text('SELECT user_id FROM subscriptions WHERE id = :subscription_id'),
++        {'subscription_id': int(subscription_id)},
++    )
++    user_id = result.scalar_one_or_none()
++    if user_id is None:
++        return
++    await db.execute(
++        text('SELECT pg_advisory_xact_lock(:namespace, :subject)'),
++        {'namespace': int(settings.GRACE_LOCK_NAMESPACE), 'subject': int(user_id)},
++    )
++
++
++async def get_grace_state(db: AsyncSession, subscription_id: int) -> GraceState | None:
++    if not is_grace_integration_enabled():
++        return None
++    result = await db.execute(
++        text(
++            'SELECT state, generation FROM grace_bridge.access_state '
++            'WHERE subscription_id = :subscription_id'
++        ),
++        {'subscription_id': int(subscription_id)},
++    )
++    row = result.mappings().first()
++    if row is None:
++        return None
++    return GraceState(state=str(row['state']), generation=int(row['generation']))
++
++
++async def grace_owns_panel_access(db: AsyncSession, subscription_id: int) -> bool:
++    state = await get_grace_state(db, subscription_id)
++    return bool(state and state.owns_panel_access)
++
++
++async def invalidate_grace_for_paid_access(db: AsyncSession, subscription_id: int) -> bool:
++    """Make every older Grace operation for this Bedolaga user stale."""
++    if not is_grace_integration_enabled():
++        return False
++    now = datetime.now(UTC)
++    result = await db.execute(
++        text(
++            "UPDATE grace_bridge.access_state AS ga "
++            "SET state = 'inactive', generation = ga.generation + 1, "
++            "    last_error = NULL, updated_at = :now "
++            "FROM subscriptions AS owned, subscriptions AS target "
++            "WHERE target.id = :subscription_id "
++            "  AND owned.user_id = target.user_id "
++            "  AND ga.subscription_id = owned.id "
++            "  AND ga.state <> 'inactive' "
++            "RETURNING ga.subscription_id, ga.generation"
++        ),
++        {'subscription_id': int(subscription_id), 'now': now},
++    )
++    rows = result.all()
++    if not rows:
++        return False
++    await db.execute(
++        text(
++            "UPDATE grace_bridge.commands AS gc "
++            "SET state = 'stale', updated_at = :now "
++            "FROM grace_bridge.access_state AS ga, subscriptions AS owned, subscriptions AS target "
++            "WHERE target.id = :subscription_id "
++            "  AND owned.user_id = target.user_id "
++            "  AND ga.subscription_id = owned.id "
++            "  AND gc.subscription_id = ga.subscription_id "
++            "  AND gc.state IN ('pending', 'processing') "
++            "  AND gc.generation < ga.generation"
++        ),
++        {'subscription_id': int(subscription_id), 'now': now},
++    )
++    logger.info(
++        'Grace access invalidated by paid subscription state',
++        subscription_id=subscription_id,
++        invalidated_subscription_ids=[int(row[0]) for row in rows],
++    )
++    return True
++
++
++async def should_ignore_panel_event_during_grace(
++    db: AsyncSession,
++    subscription_id: int,
++    event_name: str,
++) -> bool:
++    if event_name not in {
++        'user.expired',
++        'user.disabled',
++        'user.enabled',
++        'user.limited',
++        'user.traffic_reset',
++        'user.modified',
++    }:
++        return False
++    return await grace_owns_panel_access(db, subscription_id)
