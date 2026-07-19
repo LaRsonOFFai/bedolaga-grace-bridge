@@ -12,7 +12,7 @@ from typing import Any
 class InstallationState:
     schema: int = 1
     phase: str = "absent"
-    bridge_version: str = "0.1.0"
+    bridge_version: str = "0.2.0"
     bedolaga_version: str | None = None
     bedolaga_commit: str | None = None
     backup_id: str | None = None
@@ -22,6 +22,7 @@ class InstallationState:
     paused_from_phase: str | None = None
     paused_activation_percent: int = 0
     canary_uuid_hash: str | None = None
+    managed_squad_uuid: str | None = None
     last_error: str | None = None
     updated_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
